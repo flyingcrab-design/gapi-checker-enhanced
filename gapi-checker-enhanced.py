@@ -72,6 +72,66 @@ def req(method, url, data=None, json_data=None):
         return 0, "", str(e)
 
 
+def parse_google_error(body):
+    """Extract error reason and status from Google API JSON error response."""
+    try:
+        err = json.loads(body).get("error", {})
+        msg = (err.get("message", "") or "").lower()
+        status = (err.get("status", "") or "").lower()
+        return msg, status
+    except (json.JSONDecodeError, AttributeError):
+        return body.lower()[:200], ""
+
+
+def classify_error(msg, status_code):
+    """Classify Google API error into a category.
+
+    Returns (category, icon) where category is one of:
+      'success', 'invalid_key', 'api_not_enabled', 'restricted_key', 'quota', 'other'
+    """
+    if status_code in (200, 201):
+        return "success", "✅"
+
+    m = msg.lower() if msg else ""
+    s = status_code
+
+    # Invalid / bad key
+    if any(k in m for k in [
+        "invalidapikey", "invalid api key", "api key not valid",
+        "invalid key", "api key invalid", "api_key_invalid",
+        "api key not found", "keyinvalid", "api key expired",
+        "API_KEY_INVALID", "key is invalid", "the provided api key is invalid",
+        "request is missing required authentication credential",
+    ]):
+        return "invalid_key", "❌"
+
+    # Key valid but this API not enabled for the project
+    # Based on slayer-apis-scanner classification
+    if any(k in m for k in [
+        "has not been used", "not enabled", "access not configured",
+        "service_disabled", "it is disabled", "api has not been used",
+        "method doesn't allow unregistered callers",
+        "is not enabled for your project",
+    ]):
+        return "api_not_enabled", "🔒"
+
+    # Key valid but restricted to specific APIs (not the one tested)
+    if any(k in m for k in [
+        "permission_denied", "forbidden",
+        "requests from this ip", "referer",
+    ]) and "not enabled" not in m and "has not been used" not in m:
+        return "restricted_key", "⚠️"
+
+    # Quota / rate limiting
+    if any(k in m for k in [
+        "quota exceeded", "rate limit", "too many requests",
+        "429", "resource exhausted",
+    ]) or s == 429:
+        return "quota", "⏳"
+
+    return "other", "❓"
+
+
 def test_endpoint(service, method, url, apikey, success_codes=(200,),
                   fail_patterns=None, notes=""):
     """Run a single test against a Google API endpoint."""
@@ -79,46 +139,23 @@ def test_endpoint(service, method, url, apikey, success_codes=(200,),
 
     if error:
         return {"service": service, "url": url, "status": status,
-                "valid": False, "auth_failed": False, "error": error,
-                "note": notes, "test_type": "error"}
+                "valid": False, "auth_failed": False, "not_enabled": False,
+                "category": "error", "icon": "⚠️",
+                "note": notes, "response": str(error)}
 
-    # Detect if key was rejected by Google
-    fail_keywords = fail_patterns or [
-        "api key not valid", "api key not found", "invalid API key",
-        "keyinvalid", "key expired", "not enabled", "access denied",
-        "access not configured", "permission denied",
-        "invalid_key", "api_key_invalid", "api key invalid",
-        "request is missing required authentication credential",
-        "API_KEY_INVALID", "API key not found",
-        "API key expired", "API key rejected"
-    ]
-    failed_auth = any(k.lower() in body.lower() for k in fail_keywords)
+    msg, _ = parse_google_error(body)
+    category, icon = classify_error(msg, status)
 
-    # A 403 with "API not enabled" vs "permission denied" matters
-    is_not_enabled = "not enabled" in body.lower() or "access not configured" in body.lower()
-    is_permission_denied = "permission denied" in body.lower() and not is_not_enabled
-
-    if status in success_codes and not failed_auth:
-        is_valid = True
-        icon = "✅"
-    elif is_not_enabled:
-        is_valid = False
-        icon = "🔒"
-    elif failed_auth:
-        is_valid = False
-        icon = "❌"
-    elif is_permission_denied:
-        is_valid = False
-        icon = "⚠️"
-    else:
-        is_valid = False
-        icon = "❓"
+    is_valid = category == "success"
+    is_not_enabled = category == "api_not_enabled"
+    is_invalid = category == "invalid_key"
+    is_restricted = category == "restricted_key"
 
     return {"service": service, "url": url, "status": status,
-            "valid": is_valid, "auth_failed": failed_auth,
+            "valid": is_valid, "auth_failed": is_invalid,
             "not_enabled": is_not_enabled,
-            "note": notes, "response": body[:120].replace("\n", " "),
-            "test_type": icon}
+            "category": category, "icon": icon,
+            "note": notes, "response": body[:120].replace("\n", " ")}
 
 
 def build_tests(apikey):
@@ -258,17 +295,18 @@ def scan_key(apikey, json_output=False, generate_poc=False):
                 results.append({"service": futures[fut], "valid": False,
                                 "auth_failed": False, "error": str(e)})
 
-    # Sort: accessible first, then denied, then unknown
-    results.sort(key=lambda r: (
-        0 if r.get("valid") else
-        1 if r.get("auth_failed") else
-        2 if r.get("not_enabled") else 3,
-        r.get("service", "")))
+    # Sort: accessible first, then restricted, not_enabled, invalid, quota, other
+    cat_order = {"success": 0, "restricted_key": 1, "api_not_enabled": 2,
+                 "invalid_key": 3, "quota": 4, "error": 5, "other": 6}
+    results.sort(key=lambda r: (cat_order.get(r.get("category", "other"), 9),
+                                r.get("service", "")))
 
-    accessible = [r for r in results if r.get("valid")]
-    denied = [r for r in results if r.get("auth_failed")]
-    not_enabled = [r for r in results if r.get("not_enabled")]
-    unknown = [r for r in results if not r.get("valid") and not r.get("auth_failed") and not r.get("not_enabled")]
+    accessible = [r for r in results if r.get("category") == "success"]
+    restricted = [r for r in results if r.get("category") == "restricted_key"]
+    not_enabled = [r for r in results if r.get("category") == "api_not_enabled"]
+    denied = [r for r in results if r.get("category") == "invalid_key"]
+    quota = [r for r in results if r.get("category") == "quota"]
+    other = [r for r in results if r.get("category") in ("other", "error")]
 
     if json_output:
         report = {
@@ -276,8 +314,11 @@ def scan_key(apikey, json_output=False, generate_poc=False):
             "timestamp": datetime.now().isoformat(),
             "total_tests": len(results),
             "valid": len(accessible),
-            "auth_failed": len(denied),
+            "restricted": len(restricted),
             "not_enabled": len(not_enabled),
+            "invalid_key": len(denied),
+            "quota": len(quota),
+            "other": len(other),
             "results": results
         }
         print(json.dumps(report, indent=2))
@@ -285,9 +326,13 @@ def scan_key(apikey, json_output=False, generate_poc=False):
         print(f"\n{'='*70}")
         key_masked = apikey[:20] + "..." + apikey[-8:]
         print(f"  Google API Key: {key_masked}")
-        print(f"  Tests: {len(results)}  |  ✅ Accessible: {len(accessible)}  |"
-              f"  ❌ Denied: {len(denied)}  |  🔒 Not enabled: {len(not_enabled)}  |"
-              f"  ❓ Other: {len(unknown)}")
+        print(f"  Tests: {len(results)}  |  ✅ {len(accessible)} accessible  |"
+              f"  ⚠️  {len(restricted)} restricted  |  🔒 {len(not_enabled)} not enabled  |"
+              f"  ❌ {len(denied)} invalid")
+        if quota:
+            print(f"  ⏳ {len(quota)} rate limited  |  ❓ {len(other)} other")
+        else:
+            print(f"  ❓ {len(other)} other")
         print(f"{'='*70}")
 
         if accessible:
@@ -298,23 +343,33 @@ def scan_key(apikey, json_output=False, generate_poc=False):
                 if generate_poc:
                     print(f"     curl -X GET '{r['url']}'")
 
+        if restricted:
+            print(f"\n⚠️  KEY RESTRICTED ({len(restricted)}):")
+            for r in restricted:
+                print(f"  ⚠️  {r['service']:<30} (HTTP {r['status']})")
+
+        if not_enabled:
+            print(f"\n🔒 API NOT ENABLED ({len(not_enabled)}):")
+            for r in not_enabled:
+                print(f"  🔒 {r['service']:<30} (HTTP {r['status']})")
+
         if denied:
-            print(f"\n❌ ACCESS DENIED ({len(denied)}):")
+            print(f"\n❌ INVALID KEY ({len(denied)}):")
             for r in denied:
                 print(f"  ❌ {r['service']:<30} (HTTP {r['status']})")
 
-        if not_enabled:
-            print(f"\n🔒 NOT ENABLED ({len(not_enabled)}):")
-            for r in not_enabled:
-                print(f"  🔒 {r['service']:<30} (API not enabled for this key)")
+        if quota:
+            print(f"\n⏳ RATE LIMITED ({len(quota)}):")
+            for r in quota:
+                print(f"  ⏳ {r['service']:<30} (HTTP {r['status']})")
 
-        if unknown:
-            print(f"\n❓ OTHER ({len(unknown)}):")
-            for r in unknown[:8]:
+        if other:
+            print(f"\n❓ OTHER ({len(other)}):")
+            for r in other[:8]:
                 resp = r.get("response", "")[:60]
                 print(f"  ❓ {r['service']:<30} (HTTP {r['status']}: {resp})")
-            if len(unknown) > 8:
-                print(f"  ... and {len(unknown)-8} more")
+            if len(other) > 8:
+                print(f"  ... and {len(other)-8} more")
 
     return results
 

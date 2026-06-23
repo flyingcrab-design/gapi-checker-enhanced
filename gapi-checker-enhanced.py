@@ -44,19 +44,18 @@ MAX_WORKERS = 10
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 
-def req(method, url, data=None, json_data=None):
+def req(method, url, data=None, json_data=None, extra_headers=None):
     """Make HTTP request and return status code + body snippet."""
     try:
+        headers = dict(HEADERS)
+        if extra_headers:
+            headers.update(extra_headers)
         if data:
             data = data.encode() if isinstance(data, str) else data
         elif json_data:
             data = json.dumps(json_data).encode()
-            if "Content-Type" not in HEADERS:
-                headers = {**HEADERS, "Content-Type": "application/json"}
-            else:
-                headers = HEADERS
-        else:
-            headers = HEADERS
+            if "Content-Type" not in {k.lower(): v for k, v in headers.items()}:
+                headers["Content-Type"] = "application/json"
 
         req_obj = urllib.request.Request(url, data=data, headers=headers,
                                          method=method)
@@ -134,9 +133,11 @@ def classify_error(msg, status_code):
 
 
 def test_endpoint(service, method, url, apikey, success_codes=(200,),
-                  fail_patterns=None, notes=""):
+                  fail_patterns=None, notes="", extra_headers=None,
+                  json_data=None, form_data=None):
     """Run a single test against a Google API endpoint."""
-    status, body, error = req(method, url)
+    status, body, error = req(method, url, json_data=json_data,
+                              data=form_data, extra_headers=extra_headers)
 
     if error:
         return {"service": service, "url": url, "status": status,
@@ -247,7 +248,7 @@ def build_tests(apikey):
     tests.append(("YouTube Search", "GET",
         f"https://www.googleapis.com/youtube/v3/search?part=snippet&q=test&key={K}"))
 
-    # ============ CLOUD STORAGE (1) — requires --project-id ============
+    # ============ CLOUD STORAGE (1) — pass --project-id for real results ============
     tests.append(("Cloud Storage", "GET",
         f"https://www.googleapis.com/storage/v1/b?project={{project_id}}&maxResults=1&key={K}",
         "requires --project-id flag"))
@@ -259,10 +260,7 @@ def build_tests(apikey):
     # ============ FIREBASE / IDENTITY (2) ============
     tests.append(("Firebase Auth (signUp)", "POST",
         f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={K}"))
-    fcm_body = '{"registration_ids":["ABC"]}'
-    tests.append(("FCM (Server Key)", "POST",
-        f"https://fcm.googleapis.com/fcm/send",
-        "uses Authorization: key= header — sent to fcm.googleapis.com"))
+    # FCM is handled in scan_key with proper POST body and Authorization header
 
     # ============ MAPS JS (1) ============
     tests.append(("Maps JavaScript", "GET",
@@ -279,7 +277,7 @@ def build_tests(apikey):
     return tests
 
 
-def scan_key(apikey, json_output=False, generate_poc=False):
+def scan_key(apikey, json_output=False, generate_poc=False, project_id=None):
     """Run all tests against a single API key."""
     results = []
     tests = build_tests(apikey)
@@ -288,9 +286,25 @@ def scan_key(apikey, json_output=False, generate_poc=False):
         futures = {}
         for name, method, url, *rest in tests:
             notes = rest[0] if rest else ""
+            # Cloud Storage: use project_id if provided
+            if name == "Cloud Storage" and project_id:
+                url = url.replace("{project_id}", project_id)
+                # Skip if no project_id
+            if name == "Cloud Storage" and not project_id:
+                continue
             fut = executor.submit(test_endpoint, name, method, url,
                                   apikey, notes=notes)
             futures[fut] = name
+
+        # FCM: special handling with proper POST body + Authorization header
+        fcm_url = f"https://fcm.googleapis.com/fcm/send"
+        fcm_headers = {"Authorization": f"key={apikey}",
+                       "Content-Type": "application/json"}
+        fcm_body = {"registration_ids": ["ABC"]}
+        fut = executor.submit(test_endpoint, "FCM (Server Key)", "POST",
+                              fcm_url, apikey,
+                              extra_headers=fcm_headers, json_data=fcm_body)
+        futures[fut] = "FCM (Server Key)"
 
         for fut in as_completed(futures):
             try:
@@ -386,6 +400,7 @@ if __name__ == "__main__":
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--poc", action="store_true",
                         help="Generate curl PoC commands for accessible endpoints")
+    parser.add_argument("--project-id", help="GCP project ID for Cloud Storage test")
     parser.add_argument("--version", action="store_true", help="Show version")
     args = parser.parse_args()
 
@@ -408,6 +423,7 @@ if __name__ == "__main__":
         if not key.startswith("AIza"):
             print(f"Skipping non-Google key: {key[:20]}...")
             continue
-        scan_key(key, json_output=args.json, generate_poc=args.poc)
+        scan_key(key, json_output=args.json, generate_poc=args.poc,
+                 project_id=args.project_id)
         if i < len(keys) - 1:
             print()

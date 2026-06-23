@@ -247,9 +247,10 @@ def build_tests(apikey):
     tests.append(("YouTube Search", "GET",
         f"https://www.googleapis.com/youtube/v3/search?part=snippet&q=test&key={K}"))
 
-    # ============ CLOUD STORAGE (1) ============
+    # ============ CLOUD STORAGE (1) — requires --project-id ============
     tests.append(("Cloud Storage", "GET",
-        f"https://www.googleapis.com/storage/v1/b?project=test&maxResults=1&key={K}"))
+        f"https://www.googleapis.com/storage/v1/b?project={{project_id}}&maxResults=1&key={K}",
+        "requires --project-id flag"))
 
     # ============ DRIVE (1) ============
     tests.append(("Google Drive", "GET",
@@ -258,8 +259,10 @@ def build_tests(apikey):
     # ============ FIREBASE / IDENTITY (2) ============
     tests.append(("Firebase Auth (signUp)", "POST",
         f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={K}"))
+    fcm_body = '{"registration_ids":["ABC"]}'
     tests.append(("FCM (Server Key)", "POST",
-        f"https://fcm.googleapis.com/fcm/send"))
+        f"https://fcm.googleapis.com/fcm/send",
+        "uses Authorization: key= header — sent to fcm.googleapis.com"))
 
     # ============ MAPS JS (1) ============
     tests.append(("Maps JavaScript", "GET",

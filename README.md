@@ -70,6 +70,9 @@ python3 gapi-checker-enhanced.py --key AIzaSy... --json
 # Generate curl PoC commands
 python3 gapi-checker-enhanced.py --file keys.txt --poc
 
+# Cloud Storage test (requires a real GCP project ID)
+python3 gapi-checker-enhanced.py --key AIzaSy... --project-id my-gcp-project
+
 # Show version
 python3 gapi-checker-enhanced.py --version
 ```

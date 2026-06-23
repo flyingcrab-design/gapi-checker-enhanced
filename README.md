@@ -15,6 +15,17 @@ Comprehensive Google API key security tester — tests API keys against 40+ Goog
 - **File mode** (`--file`) for batch scanning multiple keys
 - **No data exfiltration** — keys are only sent to Google's official API endpoints
 
+## Interpreting Results
+
+This tool tests each key **per-endpoint** — it tells you exactly which Google services accept the key.
+
+**Important distinction:** A key that passes Google's auth infrastructure (what TruffleHog calls "Verified") is **not** the same as a key that works with Gemini, Cloud Vision, or any specific service. A Google API key restricted to Maps/Places will:
+- ✅ Pass Google auth (valid format, active key)
+- ✅ Work with Directions, Geocoding, Places, etc.
+- ❌ Return 403/"not enabled" for Gemini AI, Cloud Vision, YouTube, etc.
+
+Each test result shows the actual HTTP status and response — not a single pass/fail verdict.
+
 ## Services Tested
 
 ### Maps & Places (20)

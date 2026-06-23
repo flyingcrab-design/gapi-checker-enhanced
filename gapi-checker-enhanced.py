@@ -119,6 +119,7 @@ def classify_error(msg, status_code):
     if any(k in m for k in [
         "permission_denied", "forbidden",
         "requests from this ip", "referer",
+        "rejected your request", "server rejected",
     ]) and "not enabled" not in m and "has not been used" not in m:
         return "restricted_key", "⚠️"
 
